@@ -1,0 +1,4 @@
+config_file: configs/gym_car_race.yaml
+run_id: test_gym_car
+cpu: False
+resume: False

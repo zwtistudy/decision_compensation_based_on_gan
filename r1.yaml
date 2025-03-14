@@ -1,0 +1,8 @@
+# config_file: configs/car1.yaml
+config_file: configs/torcs.yaml
+# model_id: UGVRace-20-2
+model_id: Torcs_1
+accelerate: True
+collect_episode_num: 2
+trojectory_save_id: 125_125_1
+cpu: False

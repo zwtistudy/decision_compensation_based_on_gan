@@ -1,0 +1,5 @@
+config: configs/car1.yaml
+model_id: UGVRace-20-2
+accelerate: true
+collect_episode_num: 20
+trojectory_save_id: 125_125_1

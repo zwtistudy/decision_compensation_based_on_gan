@@ -1,0 +1,13 @@
+config_file: configs/gym_car_race.yaml
+run_id: GymCarRacing_run_Ours
+#run_id: GymCarRacing_run_NNGAN
+#run_id: GymCarRacing_run_Oracle
+#run_id: GymCarRacing_run_GAN
+#run_id: GymCarRacing_run_DR
+#run_id: GymCarRacing_run_BO
+record_id: test
+log_data: True
+accelerate: False
+episode_num: 100
+cpu: False
+continue_record: False
