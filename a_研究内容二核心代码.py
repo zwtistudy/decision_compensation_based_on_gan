@@ -15,39 +15,53 @@ from yaml_parser import YamlParser
 # 决策补偿模块
 class Compensator:
     def __init__(self, config):
-        self.config = config
-        self.device = torch.device("cuda")
-        # 初始化为标准正态分布
-        self.motor_error = (0, 1)  # 电机误差的均值和标准差
-        self.steer_error = (0, 1)  # 转向误差的均值和标准差
-        self.action_delay_step = 0  # 动作延迟步数
-
-    def update_compensator(self, motor_error, steer_error, action_delay_step):
-        """更新补偿器参数
-        Args:
-            motor_error: 新的电机误差分布参数
-            steer_error: 新的转向误差分布参数
-            action_delay_step: 新的动作延迟步数
         """
-        self.motor_error = motor_error
-        self.steer_error = steer_error
+        初始化补偿器实例，用于调整决策输出以补偿模拟与现实环境之间的差异。
+
+        Args:
+            config: 配置文件，包含补偿器所需的参数。
+        """
+        self.config = config
+        self.device = torch.device("cuda")  # 设置计算设备为GPU
+        # 初始化线性变换参数（单位矩阵 + 零偏置）
+        self.m_w = np.eye(2)  # 电机线性变换的权重矩阵，初始化为单位矩阵 [[1, 0], [0, 1]]
+        self.m_b = np.zeros(2)  # 电机线性变换的偏置向量，初始化为零向量 [0, 0]
+        self.s_w = np.eye(2)  # 转向线性变换的权重矩阵，初始化为单位矩阵
+        self.s_b = np.zeros(2)  # 转向线性变换的偏置向量，初始化为零向量
+        self.action_delay_step = 1  # 动作延迟步数，用于模拟现实环境中的延迟
+
+    def update_compensator(self, m_w, m_b, s_w, s_b, action_delay_step):
+        """
+        更新补偿器的参数，包括电机和转向的线性变换参数以及动作延迟步数。
+
+        Args:
+            m_w: 电机线性变换的新权重矩阵。
+            m_b: 电机线性变换的新偏置向量。
+            s_w: 转向线性变换的新权重矩阵。
+            s_b: 转向线性变换的新偏置向量。
+            action_delay_step: 新的动作延迟步数。
+        """
+        self.m_w = m_w
+        self.m_b = m_b
+        self.s_w = s_w
+        self.s_b = s_b
         self.action_delay_step = action_delay_step
 
     # 获取增强后的决策
     def get_enhanced_action(self, action):
-        """根据当前误差分布对决策进行补偿
-        Args:
-            action: 原始决策
-        Returns:
-            增强后的决策，考虑了电机和转向的误差
         """
-        enhanced_action = action
-        # 对motor和steer进行采样
-        motor = np.random.normal(*self.motor_error)  # 从电机误差分布中采样
-        steer = np.random.normal(*self.steer_error)  # 从转向误差分布中采样
-        enhanced_action[0] += motor  # 对电机控制量进行补偿
-        enhanced_action[1] += steer  # 对转向控制量进行补偿
+        根据当前误差分布对决策进行补偿，生成增强后的决策。
+
+        Args:
+            action: 原始决策，由策略网络生成。
+
+        Returns:
+            增强后的决策，考虑了电机和转向的误差，用于实际执行。
+        """
+        # 计算增强后的决策
+        enhanced_action = np.dot(self.m_w, action) + self.m_b  # 应用电机线性变换
         return enhanced_action
+
 
 
 class TrajectoryDataset(Dataset):
@@ -90,59 +104,76 @@ class TrajectoryDataset(Dataset):
         return self.sasasass[idx]
 
 
-# 定义生成器模型
 class Generator:
     def __init__(self):
-        """初始化生成器，使用高斯过程回归模型生成参数"""
-        # 定义高斯过程核函数
-        kernel = C(1.0, (1e-3, 1e3)) * RBF(10, (1e-2, 1e2))
+        """初始化生成器，使用高斯过程回归生成四维补偿参数"""
+        # 扩展核函数到四维参数空间
+        kernel = (C(1.0, (1e-3, 1e3)) * RBF([10,10,10,10], (1e-2, 1e2)))
         self.gp = GaussianProcessRegressor(
             kernel=kernel, alpha=1e-5, n_restarts_optimizer=10
         )
 
-        # 定义初始样本
-        self.X_init = np.array([[1.0, 1.0]])  # 初始输入样本
-        self.Y_init = np.array([1.98]).reshape(-1, 1)  # 初始输出样本
-        self.gp.fit(self.X_init, self.Y_init)  # 拟合初始模型
+        # 初始化四维参数样本（单位矩阵 + 零偏置）
+        self.X_init = np.array([[1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1]])
+        self.Y_init = np.array([1.98]).reshape(-1, 1)
+        self.gp.fit(self.X_init, self.Y_init)
 
     def generate_param(self):
-        """生成新的参数，用于调整模拟环境与真实环境的差异
-        Returns:
-            最优参数值，用于补偿模块的误差调整
-        """
-        # 定义采集函数，用于寻找最优参数
+        """生成四维补偿参数和延迟步数"""
         def acquisition(x):
             x = np.atleast_2d(x)
             mu, sigma = self.gp.predict(x, return_std=True)
-            return -(mu + 1.96 * sigma)  # 使用置信上限作为优化目标
+            return -(mu + 1.96 * sigma)
 
-        # 定义搜索空间边界
-        bounds = np.array([[0, 10.0], [0, 10.0]])
+        # 扩展搜索空间到四维参数
+        bounds = [
+            [0, 10.0], [0, 10.0], [0, 10.0], [0, 10.0],  # m_w
+            [-5, 5], [-5, 5],  # m_b
+            [0, 10.0], [0, 10.0],  # s_w
+            [1, 5]  # action_delay_step (整数步)
+        ]
+
         best_res = None
-        # 多次随机初始化寻找最优参数
         for _ in range(10):
-            x0 = np.random.uniform(0, 4.0, size=(2,))
+            # 随机初始化时保持矩阵对称性
+            x0 = [
+                np.random.uniform(0, 4.0), 0,  # m_w[0][0], m_w[0][1]
+                0, np.random.uniform(0, 4.0),  # m_w[1][0], m_w[1][1]
+                np.random.uniform(-2, 2), np.random.uniform(-2, 2),  # m_b
+                np.random.uniform(0, 4.0), 0,  # s_w[0][0], s_w[0][1]
+                0, np.random.uniform(0, 4.0),  # s_w[1][0], s_w[1][1]
+                np.random.randint(1, 5)  # action_delay_step
+            ]
             res = minimize(acquisition, x0=x0, bounds=bounds)
             if best_res is None or res.fun < best_res.fun:
                 best_res = res
-        return best_res.x
 
-    def update(self, x, y):
-        """更新生成器模型
-        Args:
-            x: 新参数
-            y: 对应得分
-        """
-        self.X_init = np.vstack((self.X_init, x))  # 更新输入样本
-        self.Y_init = np.vstack((self.Y_init, y))  # 更新输出样本
-        self.gp.fit(self.X_init, self.Y_init)  # 重新拟合模型
+        # 将参数转换为补偿器需要的格式
+        params = best_res.x
+        return {
+            'm_w': [[params[0], params[1]], [params[2], params[3]]],
+            'm_b': [params[4], params[5]],
+            's_w': [[params[6], params[7]], [params[8], params[9]]],
+            's_b': [params[10], params[11]],
+            'action_delay_step': int(params[12])
+        }
+
+    def update(self, param_dist, generator_total_rewards_avg):
+        """更新高斯过程回归模型"""
+        self.X_init = np.vstack((self.X_init, param_dist))
+        self.Y_init = np.vstack((self.Y_init, generator_total_rewards_avg))
+        self.gp.fit(self.X_init, self.Y_init)
 
     def update_compensator(self, compensator):
-        """更新补偿器参数
-        Args:
-            compensator: 补偿器实例，用于调整决策输出
-        """
-        compensator.update_compensator(self.motor_error, self.steer_error, self.action_delay_step)
+        """更新补偿器参数"""
+        params = self.generate_param()
+        compensator.update_compensator(
+            m_w=params['m_w'],
+            m_b=params['m_b'],
+            s_w=params['s_w'],
+            s_b=params['s_b'],
+            action_delay_step=params['action_delay_step']
+        )
 
 
 # 定义判别器模型
